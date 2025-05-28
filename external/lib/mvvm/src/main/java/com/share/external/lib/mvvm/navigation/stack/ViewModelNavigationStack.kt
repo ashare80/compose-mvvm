@@ -17,31 +17,60 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 /**
- * Concrete, mutable navigation stack. All public methods forward to modifications on an internal [DoublyLinkedMap] and
- * trigger Compose recomposition via a snapshot state.
+ * Concrete, mutable navigation stack that manages [ViewModelStoreContentProvider] instances keyed by [NavigationKey].
+ *
+ * Backed by a [DoublyLinkedMap], this stack integrates tightly with Compose to drive screen transitions,
+ * modal overlays, and scoped lifecycle management.
+ *
+ * ### Features:
+ * - State is exposed via [stack], a [mutableStateOf] snapshot-backed map to trigger Compose recomposition.
+ * - Supports nested transaction batching via [transactionRefCount] to defer recomposition and lifecycle effects.
+ * - Pushes views onto the stack with [push], removing and cancelling existing entries with matching keys.
+ * - Provides [pop], [popTo], and [removeAll] operations for typical back stack navigation.
+ * - Defers cancellation logic (e.g., ViewModel teardown) until the transaction is complete using [transactionFinished].
+ * - Uses [ViewLifecycleScope] to automatically remove entries when their lifecycle completes.
+ *
+ * @param V The view type managed by the stack.
+ * @param rootScope The parent coroutine scope for all views in the stack.
+ * @param initialStack Optional lambda to prepopulate the stack in a single transaction.
+ *
+ * @see ViewModelStoreContentProvider
+ * @see NavigationKey
+ * @see transaction
  */
 @Stable
-open class ViewModelNavigationStack<V>(private val rootScope: ManagedCoroutineScope) : NavigationBackStack {
+open class ViewModelNavigationStack<V>(
+    private val rootScope: ManagedCoroutineScope,
+    initialStack: (NavigationStack<V>) -> Unit = {},
+) : NavigationBackStack {
     private val providers = doublyLinkedMapOf<NavigationKey, ViewModelStoreContentProvider<V>>()
 
     var stack: DoublyLinkedMap<NavigationKey, ViewModelStoreContentProvider<V>> by
         mutableStateOf(value = providers, policy = neverEqualPolicy())
         private set
 
-    fun rootContext(): NavigationStackScope<V> = NavigationStackContext(scope = rootScope, stack = this)
-
     override val size: Int by derivedStateOf { stack.size }
 
     protected val last by derivedStateOf { stack.values.lastOrNull() }
 
+    private var shouldUpdateState: Boolean = false
+    private var transactionRefCount: Int = 0
+    private val transactionFinished: MutableList<() -> Unit> = mutableListOf()
+
     init {
+        transaction {
+            initialStack(rootNavigationScope())
+        }
+
         rootScope.invokeOnCompletion {
             // Parent scope could complete off main thread.
             MainImmediateScope().launch { removeAll() }
         }
     }
 
-    internal fun push(key: NavigationKey, content: V, scope: ViewLifecycleScope) {
+    fun rootNavigationScope(): NavigationStackScope<V> = NavigationStackContext(scope = rootScope, stack = this)
+
+    internal fun push(key: NavigationKey, content: () -> V, scope: ViewLifecycleScope) {
         if (!rootScope.isActive || !scope.isActive) {
             Timber.tag(TAG).wtf("Scope is not active pushing $key, $content onto nav stack: $this")
             return
@@ -50,30 +79,42 @@ open class ViewModelNavigationStack<V>(private val rootScope: ManagedCoroutineSc
             return
         }
         val previous = providers[key]
-        providers[key] = ViewModelStoreContentProviderImpl(view = content, scope = scope)
-        updateState()
-        previous?.cancel(awaitChildrenComplete = true, message = "Pushed new content for key: $key")
+        val provider = ViewModelStoreContentProviderImpl(view = content, scope = scope)
+        providers[key] = provider
 
-        scope.invokeOnCompletion { MainImmediateScope().launch { remove(key) } }
+        transactionFinished.add {
+            previous?.cancel(awaitChildrenComplete = true, message = "Pushed new content for key: $key")
+
+            scope.invokeOnCompletion { MainImmediateScope().launch { remove(key) } }
+        }
+
+        // run lazy view after provider created and set in position to avoid out of order entries from a recursive call
+        provider.view
+
+        updateState()
     }
 
     override fun pop(): Boolean {
         return providers.removeLast()?.run {
+            transactionFinished.add {
+                cancel(awaitChildrenComplete = true, message = "Popped from back stack")
+            }
             updateState()
-            cancel(awaitChildrenComplete = true, message = "Popped from back stack")
         } != null
     }
 
     override fun popTo(key: NavigationKey, inclusive: Boolean): Boolean {
         val removed = providers.removeAllAfter(key, inclusive)
         return if (removed.isNotEmpty()) {
-            updateState()
-            removed.asReversed().forEach {
-                it.cancel(
-                    awaitChildrenComplete = true,
-                    message = "Popped from back stack to: $key inclusive: $inclusive",
-                )
+            transactionFinished.add {
+                removed.asReversed().forEach {
+                    it.cancel(
+                        awaitChildrenComplete = true,
+                        message = "Popped from back stack to: $key inclusive: $inclusive",
+                    )
+                }
             }
+            updateState()
             true
         } else false
     }
@@ -84,13 +125,34 @@ open class ViewModelNavigationStack<V>(private val rootScope: ManagedCoroutineSc
 
     override fun remove(key: NavigationKey) {
         providers.remove(key)?.run {
+            transactionFinished.add {
+                cancel(awaitChildrenComplete = true, message = "Removed from back stack")
+            }
             updateState()
-            cancel(awaitChildrenComplete = true, message = "Removed from back stack")
+        }
+    }
+
+    final override fun transaction(block: () -> Unit) {
+        transactionRefCount += 1
+        try {
+            block()
+        } finally {
+            transactionRefCount -= 1
+            if (shouldUpdateState && transactionRefCount == 0) {
+                shouldUpdateState = false
+                updateState()
+            }
         }
     }
 
     private fun updateState() {
-        stack = providers
+        if (transactionRefCount > 0) {
+            shouldUpdateState = true
+        } else {
+            stack = providers
+            transactionFinished.forEach { it() }
+            transactionFinished.clear()
+        }
     }
 
     companion object {

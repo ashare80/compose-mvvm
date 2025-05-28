@@ -63,7 +63,7 @@ private fun CoroutineScope.childScope(
         (coroutineContext[CoroutineName.Key]?.name ?: "").ifBlank {
             "parent(${Integer.toHexString(System.identityHashCode(coroutineContext.job))})"
         }
-    val childName = "$parentName->$name(${Integer.toHexString(System.identityHashCode(job))})"
+    val childName = "$parentName⇨$name(${Integer.toHexString(System.identityHashCode(job))})"
 
     job.invokeOnCompletion { error ->
         if (error is CancellationException) {

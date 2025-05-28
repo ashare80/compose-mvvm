@@ -14,15 +14,10 @@ object OnboardingViewModule {
     @OnboardingScope
     @Provides
     fun onboardingView(scope: OnboardingComponent.Scope, signIn: SignInComponent.Factory) =
-        OnboardingView(navigationStack = ViewModelNavigationStack(scope), signIn = signIn)
+        OnboardingView(navigationStack = ViewModelNavigationStack(scope, initialStack = { it.push(signIn) }))
 }
 
-class OnboardingView(private val navigationStack: ViewModelNavigationStack<Screen>, signIn: SignInComponent.Factory) :
-    View {
-    init {
-        navigationStack.rootContext().push(signIn)
-    }
-
+class OnboardingView(private val navigationStack: ViewModelNavigationStack<Screen>) : View {
     override val content: @Composable () -> Unit = {
         NavigationStackHost(
             analyticsId = "OnboardingNavigationStackHost",

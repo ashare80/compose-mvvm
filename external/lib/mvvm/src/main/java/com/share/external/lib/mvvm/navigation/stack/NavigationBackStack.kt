@@ -54,4 +54,6 @@ interface NavigationBackStack {
      * No-op if the stack is already empty.
      */
     fun removeAll()
+
+    fun transaction(block: () -> Unit)
 }

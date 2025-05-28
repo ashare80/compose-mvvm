@@ -56,9 +56,11 @@ interface ViewModelStoreContentProvider<V> : ManagedCoroutineScope {
  * @param scope The view-scoped lifecycle and coroutine scope.
  */
 @Immutable
-internal open class ViewModelStoreContentProviderImpl<V>(override val view: V, private val scope: ViewLifecycleScope) :
+internal open class ViewModelStoreContentProviderImpl<V>(view: () -> V, private val scope: ViewLifecycleScope) :
     ViewModelStoreContentProvider<V>, ManagedCoroutineScope by scope {
     private val owner = DefaultViewModelStoreOwner()
+
+    override val view: V by lazy(mode = LazyThreadSafetyMode.NONE, initializer = view)
 
     override fun cancel(awaitChildrenComplete: Boolean, message: String) {
         owner.clear()

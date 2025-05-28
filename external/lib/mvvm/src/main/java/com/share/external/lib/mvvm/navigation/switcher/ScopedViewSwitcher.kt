@@ -51,5 +51,5 @@ class ScopedViewSwitcher<K : NavigationKey>(private val scope: ManagedCoroutineS
     }
 
     private class ViewScope<K>(content: @Composable () -> Unit, val key: K, scope: ViewLifecycleScope) :
-        ViewModelStoreContentProviderImpl<@Composable () -> Unit>(view = content, scope = scope)
+        ViewModelStoreContentProviderImpl<@Composable () -> Unit>(view = { content }, scope = scope)
 }
